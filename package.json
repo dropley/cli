@@ -1,0 +1,54 @@
+{
+  "name": "dropley",
+  "version": "0.1.0",
+  "description": "Publish files and static sites to Dropley from your terminal.",
+  "license": "MIT",
+  "author": "Dropley <hello@dropley.app> (https://dropley.app)",
+  "homepage": "https://github.com/dropley/cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dropley/cli.git"
+  },
+  "bugs": "https://github.com/dropley/cli/issues",
+  "keywords": [
+    "cli",
+    "dropley",
+    "publish",
+    "static-site",
+    "hosting",
+    "share",
+    "upload"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "dropley": "./dist/bin/dropley.js"
+  },
+  "main": "./dist/cli.js",
+  "types": "./dist/cli.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.50.0",
+    "vitest": "^4.0.18"
+  }
+}
