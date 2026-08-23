@@ -93,17 +93,15 @@ npm run build       # tsc → dist/
 
 ## Release
 
-Release: push a `v*` tag; the release workflow runs checks and publishes to npm with `--provenance` via **trusted publishing** (OIDC — no npm token stored in GitHub).
+Pushing a `v*` tag runs the release workflow: lint, typecheck, tests, then `npm publish --provenance` with the `NPM_TOKEN` secret. The job runs in the `npm` GitHub environment, which requires maintainer approval before the publish step executes — releases are human-gated, never automated.
 
-Setup (once, by a maintainer):
+Release checklist:
 
-1. Make the repo public (trusted publishing is identity-based and works fine on public repos).
-2. On npmjs.com → package settings → **Trusted publishing**: add GitHub owner `dropley`, repository `cli`, environment `npm`, workflow `release.yml`.
-3. On GitHub → repo settings → **Environments** → `npm`: configure required reviewers (the approval gate the publish waits on).
+1. Bump the version: `npm version <minor|patch> --no-git-tag-version`, commit, push.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` — the workflow starts, runs checks, and pauses at the `npm` environment.
+3. Approve the deployment (Actions → Review deployments). The package publishes with SLSA provenance.
 
-The first publish is always a human step: tag, push, approve the environment.
-
-> Note: if the `dropley` package name is not yet claimed on npm, the very first publish may need a one-time token (npm requires the package to exist before trusted publishing can be configured); trusted publishing takes over for all subsequent releases.
+Setup (once, by a maintainer): a granular npm token with read/write on the `dropley` package and **bypass 2FA enabled**, stored as the `NPM_TOKEN` repository secret. The package's Publishing access must allow bypass-2FA tokens (or set the token accordingly).
 
 ## License
 
