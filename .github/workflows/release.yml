@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # for npm publish --provenance
+  id-token: write # for npm publish --provenance + trusted publishing (OIDC)
 
 jobs:
   publish:
@@ -24,6 +24,6 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # No NODE_AUTH_TOKEN: npm >= 9.9 exchanges the GitHub OIDC token for a
+      # short-lived npm credential via trusted publishing automatically.
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

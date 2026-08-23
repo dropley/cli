@@ -91,7 +91,19 @@ npm test            # vitest (mocked fetch, no network)
 npm run build       # tsc → dist/
 ```
 
-Release: push a `v*` tag; the release workflow publishes to npm with provenance. Publishing is gated behind a GitHub environment requiring maintainer approval — the first publish is always a human step.
+## Release
+
+Release: push a `v*` tag; the release workflow runs checks and publishes to npm with `--provenance` via **trusted publishing** (OIDC — no npm token stored in GitHub).
+
+Setup (once, by a maintainer):
+
+1. Make the repo public (trusted publishing is identity-based and works fine on public repos).
+2. On npmjs.com → package settings → **Trusted publishing**: add GitHub owner `dropley`, repository `cli`, environment `npm`, workflow `release.yml`.
+3. On GitHub → repo settings → **Environments** → `npm`: configure required reviewers (the approval gate the publish waits on).
+
+The first publish is always a human step: tag, push, approve the environment.
+
+> Note: if the `dropley` package name is not yet claimed on npm, the very first publish may need a one-time token (npm requires the package to exist before trusted publishing can be configured); trusted publishing takes over for all subsequent releases.
 
 ## License
 
