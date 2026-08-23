@@ -1,6 +1,6 @@
 {
   "name": "dropley",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Publish files and static sites to Dropley from your terminal.",
   "license": "MIT",
   "author": "Dropley <hello@dropley.app> (https://dropley.app)",
