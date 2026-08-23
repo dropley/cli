@@ -24,6 +24,10 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      # No NODE_AUTH_TOKEN: npm >= 9.9 exchanges the GitHub OIDC token for a
-      # short-lived npm credential via trusted publishing automatically.
-      - run: npm publish --provenance --access public
+      - name: Publish
+        run: npm publish --provenance --access public
+        env:
+          # Classic npm token (granular, read/write on the dropley package).
+          # Provenance still records GitHub Actions as the builder — the auth
+          # method is independent of --provenance.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
