@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
+  computeRetryDelay,
   createArtifact,
   deleteArtifact,
   getArtifact,
   updateArtifact,
   type UploadPart,
 } from '../src/api.js';
-import { jsonResponse, stubFetch } from './helpers.js';
+import { jsonResponse, parseMultipart, readBody, stubFetch } from './helpers.js';
 
 const PARTS: UploadPart[] = [
   { path: 'index.html', contentType: 'text/html', data: Buffer.from('<h1>hi</h1>') },
@@ -20,12 +21,11 @@ afterEach(() => {
 
 describe('createArtifact', () => {
   it('sends manifest + ordered file parts and parses the 201 body', async () => {
-    const fetchMock = stubFetch((url, init) => {
-      expect(url).toBe('https://dropley.app/api/artifacts');
+    const fetchMock = stubFetch(async (_url, init) => {
       expect(init.method).toBe('POST');
-      const form = init.body as FormData;
-      const manifest = JSON.parse(form.get('manifest') as string);
-      expect(manifest).toEqual({
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      expect(JSON.parse(parsed.fields.manifest!)).toEqual({
         manifestVersion: 1,
         entry: 'index.html',
         files: [
@@ -33,10 +33,10 @@ describe('createArtifact', () => {
           { path: 'assets/app.css', size: 6, contentType: 'text/css' },
         ],
       });
-      const files = form.getAll('file') as File[];
-      expect(files.map((f) => f.name)).toEqual(['index.html', 'assets/app.css']);
-      expect(files[0]?.type).toBe('text/html');
-      expect(files[1]?.type).toBe('text/css');
+      expect(parsed.files.map((f) => f.filename)).toEqual(['index.html', 'assets/app.css']);
+      expect(parsed.files[0]?.contentType).toBe('text/html');
+      expect(parsed.files[1]?.contentType).toBe('text/css');
+      expect(new TextDecoder().decode(parsed.files[0]?.data)).toBe('<h1>hi</h1>');
       return jsonResponse(
         {
           shortId: 'aB3cD5eF',
@@ -55,12 +55,24 @@ describe('createArtifact', () => {
   });
 
   it('omits expiry when not provided', async () => {
-    stubFetch((_url, init) => {
-      const form = init.body as FormData;
-      expect(form.get('expiry')).toBeNull();
+    stubFetch(async (_url, init) => {
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      expect(parsed.fields.expiry).toBeUndefined();
       return jsonResponse({ shortId: 'x', url: 'u', expiresAt: null, artifactToken: 't' }, 201);
     });
     await createArtifact('https://dropley.app', PARTS, {});
+  });
+
+  it('sends source and comma-joined tags as multipart fields', async () => {
+    stubFetch(async (_url, init) => {
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      expect(parsed.fields.source).toBe('claude-code');
+      expect(parsed.fields.tags).toBe('a,b,c');
+      return jsonResponse({ shortId: 'x', url: 'u', expiresAt: null, artifactToken: 't' }, 201);
+    });
+    await createArtifact('https://dropley.app', PARTS, { source: 'claude-code', tags: ['a', 'b', 'c'] });
   });
 });
 
@@ -104,7 +116,9 @@ describe('error shapes', () => {
           { 'retry-after': '30' },
         ),
     );
-    const err = await getArtifact('https://dropley.app', 'aB3cD5eF').catch((e) => e);
+    const err = await getArtifact('https://dropley.app', 'aB3cD5eF', undefined, {
+      retry: false,
+    }).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(429);
     expect(err.code).toBe('RATE_LIMITED');
@@ -181,5 +195,131 @@ describe('getArtifact / update / delete auth', () => {
     });
     await deleteArtifact('https://dropley.app', 'aB3cD5eF', 'tok_abc');
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe('computeRetryDelay', () => {
+  it('honors Retry-After in seconds, capped at 30s', () => {
+    expect(computeRetryDelay(1, 0)).toBe(1000);
+    expect(computeRetryDelay(30, 0)).toBe(30_000);
+    expect(computeRetryDelay(120, 0)).toBe(30_000);
+  });
+
+  it('falls back to exponential backoff when Retry-After is absent', () => {
+    expect(computeRetryDelay(undefined, 0)).toBe(1000);
+    expect(computeRetryDelay(undefined, 1)).toBe(2000);
+    expect(computeRetryDelay(undefined, 5)).toBe(30_000);
+  });
+});
+
+describe('429 retry', () => {
+  it('retries a 429 and succeeds on the second attempt', async () => {
+    const sleep = vi.fn(async () => {});
+    let calls = 0;
+    const fetchMock = stubFetch(() => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429, {
+          'retry-after': '2',
+        });
+      }
+      return jsonResponse({ shortId: 'aB3cD5eF', status: 'published' }, 200);
+    });
+
+    const info = await getArtifact('https://dropley.app', 'aB3cD5eF', undefined, { sleep });
+    expect(info.status).toBe('published');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(2000);
+  });
+
+  it('surfaces the error verbatim after retries are exhausted', async () => {
+    const sleep = vi.fn(async () => {});
+    const fetchMock = stubFetch(() =>
+      jsonResponse({ error: { code: 'RATE_LIMITED', message: 'Too many requests.' } }, 429, {
+        'retry-after': '1',
+      }),
+    );
+    const err = await getArtifact('https://dropley.app', 'aB3cD5eF', undefined, {
+      sleep,
+      maxRetries: 2,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe('RATE_LIMITED');
+    expect(err.message).toBe('Too many requests.');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry when retry is disabled', async () => {
+    const sleep = vi.fn(async () => {});
+    const fetchMock = stubFetch(() =>
+      jsonResponse({ error: { code: 'RATE_LIMITED', message: 'Too many requests.' } }, 429),
+    );
+    await getArtifact('https://dropley.app', 'aB3cD5eF', undefined, {
+      retry: false,
+      sleep,
+    }).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('does not retry non-429 errors', async () => {
+    const sleep = vi.fn(async () => {});
+    const fetchMock = stubFetch(() => jsonResponse({ error: 'Not found' }, 404));
+    await getArtifact('https://dropley.app', 'aB3cD5eF', undefined, { sleep }).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('createArtifact retries a 429 and re-streams the multipart body', async () => {
+    const sleep = vi.fn(async () => {});
+    let calls = 0;
+    const fetchMock = stubFetch(async (_url, init) => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429, {
+          'retry-after': '1',
+        });
+      }
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      expect(parsed.files.map((f) => f.filename)).toEqual(['index.html', 'assets/app.css']);
+      expect(new TextDecoder().decode(parsed.files[0]?.data)).toBe('<h1>hi</h1>');
+      return jsonResponse({ shortId: 'x', url: 'u', expiresAt: null, artifactToken: 't' }, 201);
+    });
+
+    const result = await createArtifact('https://dropley.app', PARTS, { sleep });
+    expect(result.shortId).toBe('x');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(1000);
+  });
+
+  it('updateArtifact retries a 429', async () => {
+    const sleep = vi.fn(async () => {});
+    let calls = 0;
+    const fetchMock = stubFetch(() => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429);
+      }
+      return jsonResponse({ success: true }, 200);
+    });
+    const result = await updateArtifact('https://dropley.app', 'aB3cD5eF', 'tok_abc', { expiry: '7d' }, { sleep });
+    expect(result.success).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('deleteArtifact retries a 429', async () => {
+    const sleep = vi.fn(async () => {});
+    let calls = 0;
+    const fetchMock = stubFetch(() => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429);
+      }
+      return jsonResponse({ success: true }, 200);
+    });
+    await deleteArtifact('https://dropley.app', 'aB3cD5eF', 'tok_abc', { sleep });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

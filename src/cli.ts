@@ -19,7 +19,7 @@ interface DropleyCommandSpec extends CommandSpec {
 const COMMANDS: Record<string, DropleyCommandSpec> = {
   publish: {
     summary: 'Publish a file or directory and print its public URL + token.',
-    flags: { expiry: 'value' },
+    flags: { expiry: 'value', tags: 'value', source: 'value' },
     positionals: [{ name: '<path>', required: true, description: 'File or directory to publish' }],
     handler: publish,
   },
@@ -30,8 +30,8 @@ const COMMANDS: Record<string, DropleyCommandSpec> = {
     handler: status,
   },
   update: {
-    summary: 'Update an artifact (expiry).',
-    flags: { expiry: 'value' },
+    summary: 'Update an artifact (expiry, source, tags).',
+    flags: { expiry: 'value', source: 'value', tags: 'value' },
     positionals: [{ name: '<url-or-shortId>', required: true }],
     handler: update,
   },
@@ -83,7 +83,10 @@ function usage(): string {
     '  --json          Machine-readable output',
     '  --api <url>     API base URL (default https://dropley.app; env DROPLEY_API)',
     '  --token <tok>   Artifact token (env DROPLEY_TOKEN)',
-    '  --expiry <t>    e.g. 1h, 1d, 3d, 7d, 15d, 30d (server-validated)',
+    '  --no-retry      Disable automatic retries on HTTP 429',
+    '  --expiry <t>    server-validated: 1d, 3d, or 7d',
+    '  --tags <a,b,c>  Comma-separated tags (max 10, each ≤ 50 chars)',
+    '  --source <s>    claude-code, chatgpt, cursor, lovable, bolt, storybook, figma, other',
     '',
     'Exit codes: 0 success · 1 failure · 2 usage error',
     'Docs: https://github.com/dropley/cli',

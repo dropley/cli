@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../src/cli.js';
-import { captureStdio, jsonResponse, stubFetch } from './helpers.js';
+import { captureStdio, jsonResponse, parseMultipart, readBody, stubFetch } from './helpers.js';
 
 let stdout: () => string;
 let stderr: () => string;
@@ -49,12 +49,12 @@ afterEach(() => {
 describe('publish', () => {
   it('publishes a directory with junk excluded and prints url + token', async () => {
     const site = makeSite();
-    const fetchMock = stubFetch((_url, init) => {
-      const form = init.body as FormData;
-      const manifest = JSON.parse(form.get('manifest') as string);
+    const fetchMock = stubFetch(async (_url, init) => {
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      const manifest = JSON.parse(parsed.fields.manifest!);
       expect(manifest.entry).toBe('index.html');
-      const files = form.getAll('file') as File[];
-      expect(files.map((f) => f.name).sort()).toEqual(['assets/app.css', 'index.html']);
+      expect(parsed.files.map((f) => f.filename).sort()).toEqual(['assets/app.css', 'index.html']);
       return jsonResponse(PUBLISH_201, 201);
     });
 
@@ -72,19 +72,61 @@ describe('publish', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dropley-file-'));
     const file = join(dir, 'page.html');
     writeFileSync(file, '<h1>renamed</h1>');
-    stubFetch((_url, init) => {
-      const form = init.body as FormData;
-      const manifest = JSON.parse(form.get('manifest') as string);
+    stubFetch(async (_url, init) => {
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      const manifest = JSON.parse(parsed.fields.manifest!);
       expect(manifest.entry).toBe('index.html');
       expect(manifest.files).toHaveLength(1);
       expect(manifest.files[0].path).toBe('index.html');
-      const files = form.getAll('file') as File[];
-      expect(files[0]?.name).toBe('index.html');
+      expect(parsed.files[0]?.filename).toBe('index.html');
       return jsonResponse(PUBLISH_201, 201);
     });
     const code = await main(['publish', file]);
     expect(code).toBe(0);
     expect(stderr()).toContain('uploaded as index.html');
+  });
+
+  it('passes --source and --tags through to the request', async () => {
+    const site = makeSite();
+    stubFetch(async (_url, init) => {
+      const contentType = (init.headers as Record<string, string>)['Content-Type'] ?? '';
+      const parsed = parseMultipart(await readBody(init), contentType);
+      expect(parsed.fields.source).toBe('claude-code');
+      expect(parsed.fields.tags).toBe('prod,team-a');
+      return jsonResponse(PUBLISH_201, 201);
+    });
+    const code = await main([
+      'publish',
+      site,
+      '--source',
+      'claude-code',
+      '--tags',
+      'prod, team-a',
+    ]);
+    expect(code).toBe(0);
+  });
+
+  it('rejects an invalid source (exit 2)', async () => {
+    const site = makeSite();
+    const code = await main(['publish', site, '--source', 'nope']);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('Invalid source');
+  });
+
+  it('rejects too many tags (exit 2)', async () => {
+    const site = makeSite();
+    const tags = Array.from({ length: 11 }, (_, i) => `t${i}`).join(',');
+    const code = await main(['publish', site, '--tags', tags]);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('Too many tags');
+  });
+
+  it('rejects a tag longer than 50 chars (exit 2)', async () => {
+    const site = makeSite();
+    const code = await main(['publish', site, '--tags', 'a'.repeat(51)]);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('Tag too long');
   });
 
   it('requires index.html at the root of a directory (exit 2)', async () => {
@@ -108,6 +150,47 @@ describe('publish', () => {
     const code = await main(['publish', site, '--json']);
     expect(code).toBe(0);
     expect(JSON.parse(stdout())).toEqual(PUBLISH_201);
+  });
+
+  it('shows upload progress on stderr, but stays quiet in --json mode', async () => {
+    const site = makeSite();
+    stubFetch(() => jsonResponse(PUBLISH_201, 201));
+    expect(await main(['publish', site])).toBe(0);
+    expect(stderr()).toContain('Uploading');
+    expect(stdout()).toContain('url:');
+
+    io.stream.stderr = '';
+    expect(await main(['publish', site, '--json'])).toBe(0);
+    expect(io.stream.stderr).not.toContain('Uploading');
+  });
+
+  it('publish retries a 429 by default and succeeds', async () => {
+    const site = makeSite();
+    let calls = 0;
+    const fetchMock = stubFetch(() => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429, {
+          'retry-after': '0',
+        });
+      }
+      return jsonResponse(PUBLISH_201, 201);
+    });
+    expect(await main(['publish', site])).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(stderr()).toContain('Rate limited (429)');
+  });
+
+  it('publish --no-retry surfaces the 429 without retrying', async () => {
+    const site = makeSite();
+    const fetchMock = stubFetch(() =>
+      jsonResponse({ error: { code: 'RATE_LIMITED', message: 'Too many requests' } }, 429, {
+        'retry-after': '30',
+      }),
+    );
+    expect(await main(['publish', site, '--no-retry'])).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(stderr()).toContain('RATE_LIMITED');
   });
 });
 
@@ -135,17 +218,34 @@ describe('status', () => {
     expect(stderr()).toContain('404');
   });
 
-  it('surfaces a 429 nested error with Retry-After (exit 1)', async () => {
+  it('surfaces a 429 nested error with Retry-After (exit 1) with --no-retry', async () => {
     stubFetch(() =>
       jsonResponse({ error: { code: 'RATE_LIMITED', message: 'Too many requests' } }, 429, {
         'retry-after': '30',
       }),
     );
-    const code = await main(['status', 'aB3cD5eF']);
+    const code = await main(['status', 'aB3cD5eF', '--no-retry']);
     expect(code).toBe(1);
     expect(stderr()).toContain('RATE_LIMITED');
     expect(stderr()).toContain('retry-after: 30');
     expect(stderr()).toContain('Too many requests');
+  });
+
+  it('retries a 429 by default and succeeds', async () => {
+    let calls = 0;
+    const fetchMock = stubFetch(() => {
+      calls++;
+      if (calls === 1) {
+        return jsonResponse({ error: { code: 'RATE_LIMITED', message: 'slow down' } }, 429, {
+          'retry-after': '0',
+        });
+      }
+      return jsonResponse({ shortId: 'aB3cD5eF', status: 'published' }, 200);
+    });
+    const code = await main(['status', 'aB3cD5eF']);
+    expect(code).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(stderr()).toContain('Rate limited (429)');
   });
 });
 
@@ -193,5 +293,43 @@ describe('update & delete auth flow', () => {
     await main(['publish', site]);
     await main(['update', 'aB3cD5eF', '--expiry', '1d', '--token', 'tok_flag']);
     expect(seen[0]).toBe('tok_flag');
+  });
+
+  it('updates source and tags without expiry', async () => {
+    stubFetch((url, init) => {
+      if (url.endsWith('/api/artifacts') && init.method === 'POST') {
+        return jsonResponse(PUBLISH_201, 201);
+      }
+      expect(init.method).toBe('PATCH');
+      expect(JSON.parse(String(init.body))).toEqual({
+        source: 'claude-code',
+        tags: ['v1', 'stable'],
+      });
+      return jsonResponse({ success: true, source: 'claude-code', tags: ['v1', 'stable'] }, 200);
+    });
+    const site = makeSite();
+    await main(['publish', site]);
+    const code = await main([
+      'update',
+      'aB3cD5eF',
+      '--source',
+      'claude-code',
+      '--tags',
+      'v1, stable',
+    ]);
+    expect(code).toBe(0);
+    expect(stdout()).toContain('updated: aB3cD5eF');
+  });
+
+  it('requires at least one of expiry/source/tags (exit 2)', async () => {
+    const code = await main(['update', 'aB3cD5eF']);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('Nothing to update');
+  });
+
+  it('rejects an invalid source on update (exit 2)', async () => {
+    const code = await main(['update', 'aB3cD5eF', '--source', 'wat']);
+    expect(code).toBe(2);
+    expect(stderr()).toContain('Invalid source');
   });
 });

@@ -20,6 +20,7 @@ export const GLOBAL_FLAGS: Record<string, FlagKind> = {
   token: 'value',
   help: 'boolean',
   version: 'boolean',
+  'no-retry': 'boolean',
 };
 
 export interface ParsedInvocation {

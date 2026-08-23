@@ -2,6 +2,7 @@ import { getArtifact } from '../api.js';
 import type { ParsedArgs } from '../args.js';
 import { commandContext } from './context.js';
 import type { Io } from '../output.js';
+import { retryOptions } from '../retry.js';
 
 function humanValue(v: unknown): string {
   if (v === null || v === undefined) return '-';
@@ -15,7 +16,7 @@ export async function status(parsed: ParsedArgs, io: Io): Promise<number> {
   const { shortId, token, baseUrl } = commandContext(parsed);
   if (!token) io.stderr('No artifact token found — showing public metadata only.');
 
-  const info = await getArtifact(baseUrl, shortId, token);
+  const info = await getArtifact(baseUrl, shortId, token, retryOptions(parsed, io));
 
   if (io.json) {
     io.printJson(info);

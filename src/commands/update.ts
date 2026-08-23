@@ -3,17 +3,33 @@ import type { ParsedArgs } from '../args.js';
 import { commandContextWithToken } from './context.js';
 import { UsageError } from '../errors.js';
 import type { Io } from '../output.js';
-import { validateExpiry } from './publish.js';
+import { validateExpiry, validateSource, parseTags } from './publish.js';
+import { retryOptions } from '../retry.js';
 
 export async function update(parsed: ParsedArgs, io: Io): Promise<number> {
+  const patch: Record<string, unknown> = {};
+
   const expiry = parsed.values.expiry;
-  if (expiry === undefined) {
-    throw new UsageError('Nothing to update. Pass --expiry <value> (e.g. --expiry 7d).');
+  if (expiry !== undefined) {
+    validateExpiry(expiry);
+    patch.expiry = expiry;
   }
-  validateExpiry(expiry);
+  const source = parsed.values.source;
+  if (source !== undefined) {
+    validateSource(source);
+    patch.source = source;
+  }
+  const tags = parsed.values.tags;
+  if (tags !== undefined) {
+    patch.tags = parseTags(tags);
+  }
+
+  if (Object.keys(patch).length === 0) {
+    throw new UsageError('Nothing to update. Pass --expiry <value>, --source <value>, or --tags <a,b,c>.');
+  }
 
   const { shortId, token, baseUrl } = commandContextWithToken(parsed);
-  const result = await updateArtifact(baseUrl, shortId, token, { expiry });
+  const result = await updateArtifact(baseUrl, shortId, token, patch, retryOptions(parsed, io));
 
   if (io.json) {
     io.printJson(result);

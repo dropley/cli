@@ -3,6 +3,8 @@ import { ApiError } from './api.js';
 export interface Io {
   stdout(message: string): void;
   stderr(message: string): void;
+  /** Writes to stderr verbatim (no newline appended) — for progress lines. */
+  stderrRaw(message: string): void;
   printJson(value: unknown): void;
   readonly json: boolean;
 }
@@ -11,6 +13,7 @@ export function createIo(jsonMode: boolean): Io {
   return {
     stdout: (m) => process.stdout.write(m.endsWith('\n') ? m : `${m}\n`),
     stderr: (m) => process.stderr.write(m.endsWith('\n') ? m : `${m}\n`),
+    stderrRaw: (m) => process.stderr.write(m),
     printJson: (v) => process.stdout.write(`${JSON.stringify(v, null, 2)}\n`),
     json: jsonMode,
   };

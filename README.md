@@ -25,11 +25,15 @@ dropley publish ./dist --expiry 7d
 # A single file is published as the site entry (index.html)
 dropley publish report.html
 
+# Tag and attribute a publish (e.g. to a source agent)
+dropley publish ./dist --tags prod,v1.0.0 --source claude-code
+
 # Show metadata (public without a token)
 dropley status https://preview.dropley.app/p/aB3cD5eF
 
-# Change expiry (needs the artifact token)
-dropley update aB3cD5eF --expiry 30d
+# Change expiry, source, or tags (needs the artifact token)
+dropley update aB3cD5eF --expiry 7d
+dropley update aB3cD5eF --source cursor --tags updated
 
 # Delete permanently
 dropley delete aB3cD5eF
@@ -51,7 +55,8 @@ dropley publish ./out --json
 ```
 
 - Exit codes: `0` success, `1` failure (API/network errors), `2` usage error.
-- API errors surface the server's `error`/`code`/`hint` verbatim on stderr, including `RATE_LIMITED` 429 responses with their `Retry-After`.
+- API errors surface the server's `error`/`code`/`hint` verbatim on stderr, including `RATE_LIMITED` 429 responses with their `Retry-After`. 429s are retried automatically (honoring `Retry-After`, up to 2 retries); pass `--no-retry` to disable.
+- Publish shows a `Uploading X / Y` progress line on stderr (suppressed in `--json` mode).
 - The token returned by `publish` is saved locally (per artifact ID, `0600` perms, `~/.config/dropley/tokens.json` or `$XDG_CONFIG_HOME`/`$DROPLEY_CONFIG_DIR`) and reused by `status`/`update`/`delete` automatically.
 
 See also the Dropley [agent skills](https://github.com/dropley) collection — `npx skills@latest add dropley/docs` for docs on publishing via agents.
@@ -60,9 +65,9 @@ See also the Dropley [agent skills](https://github.com/dropley) collection — `
 
 | Command | Description |
 | --- | --- |
-| `dropley publish <path> [--expiry <t>]` | Publish a file or directory; prints URL + token |
+| `dropley publish <path> [--expiry <t>] [--tags a,b,c] [--source <s>]` | Publish a file or directory; prints URL + token |
 | `dropley status <url-or-shortId>` | Show artifact metadata |
-| `dropley update <url-or-shortId> --expiry <t>` | Change an artifact's expiry |
+| `dropley update <url-or-shortId> [--expiry <t>] [--source <s>] [--tags a,b,c]` | Update expiry, source, or tags |
 | `dropley delete <url-or-shortId>` | Permanently delete an artifact |
 | `dropley pack <dir> [--out archive.zip]` | Create a byte-reproducible zip (auxiliary; see below) |
 
@@ -73,7 +78,10 @@ See also the Dropley [agent skills](https://github.com/dropley) collection — `
 | `--json` | Machine-readable JSON output on stdout |
 | `--api <url>` | API base URL (default `https://dropley.app`; env `DROPLEY_API` for local previews) |
 | `--token <tok>` | Artifact token (env `DROPLEY_TOKEN`); precedence: `--token` > `DROPLEY_TOKEN` > saved token |
-| `--expiry <t>` | `1d` `3d` `7d` `15d` `30d` `1h`… — server-validated |
+| `--no-retry` | Disable automatic retries on HTTP 429 |
+| `--expiry <t>` | Server-validated: `1d`, `3d`, or `7d` |
+| `--tags <a,b,c>` | Comma-separated tags (max 10, each ≤ 50 chars) |
+| `--source <s>` | `claude-code`, `chatgpt`, `cursor`, `lovable`, `bolt`, `storybook`, `figma`, `other` |
 
 ### Notes
 

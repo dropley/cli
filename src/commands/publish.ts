@@ -2,11 +2,12 @@ import { statSync, readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { contentTypeForPath } from '../mime.js';
 import { collectFiles, MAX_TOTAL_BYTES, type CollectedFile } from '../collect.js';
-import { createArtifact, type UploadPart } from '../api.js';
+import { createArtifact, MAX_TAG_LENGTH, MAX_TAGS, SOURCE_VALUES, type CreateResult, type UploadPart } from '../api.js';
 import { resolveBaseUrl, saveToken } from '../config.js';
 import { UsageError } from '../errors.js';
 import type { ParsedArgs } from '../args.js';
 import type { Io } from '../output.js';
+import { retryOptions } from '../retry.js';
 
 function formatBytes(n: number): string {
   return n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
@@ -22,8 +23,37 @@ function loadParts(files: readonly CollectedFile[]): UploadPart[] {
 
 export function validateExpiry(value: string): void {
   if (!/^\d+[hd]$/.test(value)) {
-    throw new UsageError(`Invalid expiry "${value}". Use a value like 1d, 3d, 7d, 15d, 30d or 12h.`);
+    throw new UsageError(`Invalid expiry "${value}". The server accepts 1d, 3d, or 7d.`);
   }
+}
+
+export function validateSource(value: string): void {
+  if (!(SOURCE_VALUES as readonly string[]).includes(value)) {
+    throw new UsageError(
+      `Invalid source "${value}". Use one of: ${SOURCE_VALUES.join(', ')}.`,
+    );
+  }
+}
+
+export function parseTags(raw: string): string[] {
+  const tags = raw
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (tags.length === 0) {
+    throw new UsageError('--tags requires at least one tag (comma-separated).');
+  }
+  if (tags.length > MAX_TAGS) {
+    throw new UsageError(`Too many tags: ${tags.length} (max ${MAX_TAGS}).`);
+  }
+  for (const tag of tags) {
+    if (tag.length > MAX_TAG_LENGTH) {
+      throw new UsageError(
+        `Tag too long (${tag.length} chars, max ${MAX_TAG_LENGTH}): "${tag}".`,
+      );
+    }
+  }
+  return tags;
 }
 
 export async function publish(parsed: ParsedArgs, io: Io): Promise<number> {
@@ -31,6 +61,9 @@ export async function publish(parsed: ParsedArgs, io: Io): Promise<number> {
   if (!inputPath) throw new UsageError('Missing <path> argument.');
   const expiry = parsed.values.expiry;
   if (expiry !== undefined) validateExpiry(expiry);
+  const source = parsed.values.source;
+  if (source !== undefined) validateSource(source);
+  const tags = parsed.values.tags !== undefined ? parseTags(parsed.values.tags) : undefined;
 
   const abs = resolve(inputPath);
   let st;
@@ -79,9 +112,28 @@ export async function publish(parsed: ParsedArgs, io: Io): Promise<number> {
         ]
       : loadParts(files);
 
-  io.stderr('Uploading…');
   const baseUrl = resolveBaseUrl(parsed.values.api);
-  const result = await createArtifact(baseUrl, parts, { expiry });
+
+  let progressStarted = false;
+  const reportProgress = (sent: number, total: number): void => {
+    progressStarted = true;
+    const pct = total > 0 ? Math.round((sent / total) * 100) : 100;
+    io.stderrRaw(`\rUploading ${formatBytes(sent)} / ${formatBytes(total)} (${pct}%)`);
+  };
+  if (!io.json) reportProgress(0, parts.reduce((n, p) => n + p.data.length, 0));
+
+  let result: CreateResult;
+  try {
+    result = await createArtifact(baseUrl, parts, {
+      expiry,
+      source,
+      tags,
+      ...retryOptions(parsed, io),
+      onProgress: io.json ? undefined : reportProgress,
+    });
+  } finally {
+    if (progressStarted) io.stderrRaw('\n');
+  }
 
   try {
     saveToken(result.shortId, result.artifactToken);
